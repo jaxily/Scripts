@@ -1,0 +1,1 @@
+/Applications/ffmpeg -y -i $1 -c:v mpeg4 -vtag DIVX -q:v 6 -filter:v scale=720:-1 -r 30 -c:a libmp3lame -ar 48000 -ab 128k -ac 2 -async 48000 -threads 8 $1.avi
