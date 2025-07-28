@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# Default settings
+MUTE=false
+OUTPUT_FILENAME="merged_output.mp4"
+FORCE_REENCODE=false
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -m|--mute)
+            MUTE=true
+            shift
+            ;;
+        -o|--output)
+            OUTPUT_FILENAME="$2"
+            shift 2
+            ;;
+        -r|--reencode)
+            FORCE_REENCODE=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [-m|--mute] [-o|--output filename] [-r|--reencode] [-h|--help]"
+            echo "  -m, --mute      Mute audio in the merged video"
+            echo "  -o, --output    Specify output filename (default: merged_output.mp4)"
+            echo "  -r, --reencode  Force re-encoding (use if videos have different formats)"
+            echo "  -h, --help      Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Check for MP4 files
+echo "🔍 Searching for MP4 files..."
+MP4_FILES=$(ls *.mp4 *.MP4 *.mov *.MOV 2>/dev/null)
+MP4_COUNT=$(echo "$MP4_FILES" | grep -v "^$" | wc -l)
+
+if [ $MP4_COUNT -eq 0 ]; then
+    echo "❌ No MP4 files found in current directory"
+    exit 1
+fi
+echo "✅ Found $MP4_COUNT MP4 files"
+
+# Analyze first video for format consistency check
+echo "📊 Analyzing video formats..."
+FIRST_VIDEO=$(echo "$MP4_FILES" | head -n 1)
+FIRST_FORMAT=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name,profile,width,height,r_frame_rate,pix_fmt -of csv=p=0 "$FIRST_VIDEO")
+echo "   Reference format: $FIRST_FORMAT"
+
+# Check if all videos have the same format
+COMPATIBLE=true
+for file in $MP4_FILES; do
+    FORMAT=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name,profile,width,height,r_frame_rate,pix_fmt -of csv=p=0 "$file")
+    if [ "$FORMAT" != "$FIRST_FORMAT" ]; then
+        echo "   ⚠️  Format mismatch in: $file"
+        echo "      Expected: $FIRST_FORMAT"
+        echo "      Found:    $FORMAT"
+        COMPATIBLE=false
+    fi
+done
+
+# Create file list
+echo "📝 Creating file list..."
+ls *.mp4 *.MP4 2>/dev/null | sed "s/^/file '/g; s/$/'/g" > filelist.txt
+
+# Choose merge strategy
+if [ "$COMPATIBLE" = true ] && [ "$FORCE_REENCODE" = false ]; then
+    echo "✅ All videos have compatible formats - using stream copy (no re-encoding)"
+    echo "🎬 Merging videos with stream copy..."
+    
+    if [ "$MUTE" = true ]; then
+        ffmpeg -f concat -safe 0 -i filelist.txt -c copy -an "$OUTPUT_FILENAME" -y
+    else
+        ffmpeg -f concat -safe 0 -i filelist.txt -c copy "$OUTPUT_FILENAME" -y
+    fi
+    
+else
+    echo "⚠️  Videos have different formats or re-encoding forced"
+    echo "🎬 Merging videos with re-encoding (this will take longer)..."
+    
+    # Get frame rate from first video for consistent output
+    FRAME_RATE=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$FIRST_VIDEO")
+    if [[ $FRAME_RATE == *"/"* ]]; then
+        numerator=$(echo "$FRAME_RATE" | cut -d'/' -f1)
+        denominator=$(echo "$FRAME_RATE" | cut -d'/' -f2)
+        if [ "$denominator" != "0" ]; then
+            FRAME_RATE=$(echo "scale=2; $numerator / $denominator" | bc -l)
+        else
+            FRAME_RATE="30"
+        fi
+    fi
+    
+    # Use gentle re-encoding settings
+    if [ "$MUTE" = true ]; then
+        ffmpeg -f concat -safe 0 -i filelist.txt \
+            -c:v libx264 -preset medium -crf 18 \
+            -pix_fmt yuv420p \
+            -movflags +faststart \
+            -an \
+            "$OUTPUT_FILENAME" -y
+    else
+        ffmpeg -f concat -safe 0 -i filelist.txt \
+            -c:v libx264 -preset medium -crf 18 \
+            -pix_fmt yuv420p \
+            -c:a aac -b:a 320k -ar 48000 \
+            -movflags +faststart \
+            "$OUTPUT_FILENAME" -y
+    fi
+fi
+
+# Check if ffmpeg succeeded
+if [ $? -eq 0 ]; then
+    echo "✅ Video merge completed successfully!"
+    echo "📁 Output file: $OUTPUT_FILENAME"
+    
+    # Show file size
+    if [ -f "$OUTPUT_FILENAME" ]; then
+        FILE_SIZE=$(ls -lh "$OUTPUT_FILENAME" | awk '{print $5}')
+        echo "📊 File size: $FILE_SIZE"
+    fi
+else
+    echo "❌ Video merge failed!"
+    exit 1
+fi
+
+# Clean up
+echo "🧹 Cleaning up..."
+rm -f filelist.txt
+echo "✅ Done!"
